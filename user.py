@@ -518,7 +518,7 @@ class User(object):
     def follow(self):
         # 转载注明来源: https://github.com/chen310/NeteaseCloudMusicTasks
         # 勿修改作者 ID
-        author_uid = 347837981
+        author_uid = 1892613462
         if self.uid == author_uid:
             return
         resp = self.music.user_detail(author_uid)
