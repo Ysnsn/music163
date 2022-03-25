@@ -1,11 +1,12 @@
-# coding: utf-8
-import json
+# -*- coding: utf-8 -*-
 import platform
+import json
 import os
-import time
 import requests
 from http.cookiejar import Cookie, LWPCookieJar
 from encrypt import encrypted_request
+import random
+from hashlib import md5
 
 DEFAULT_TIMEOUT = 10
 
@@ -21,23 +22,25 @@ class NetEase(object):
             "Connection": "keep-alive",
             "Content-Type": "application/x-www-form-urlencoded",
             "Host": "music.163.com",
-            "Referer": "http://music.163.com",
-            "X-Real-IP": "118.88.88.88",
+            "Referer": "https://music.163.com",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36",
         }
         username = str(username)
         self.username = username
         self.session = requests.Session()
-        if username == "":
-            return
-        cookie_file = self.cookiefile(username)
-        if cookie_file:
+
+        cookie_file = self.get_cookie_file(username)
+        if username and cookie_file:
             cookie_jar = LWPCookieJar(cookie_file)
             cookie_jar.load()
-            self.session.cookies = cookie_jar
-            self.session.cookies.load()
+        else:
+            cookie_jar = LWPCookieJar()
+        self.session.cookies = cookie_jar
 
-    def cookiefile(self, filename):
+
+    def get_cookie_file(self, filename):
+        if len(filename) == 0:
+            return None
         data_dir = os.path.join(os.path.expanduser("."), ".user_data")
         user_path = os.path.join(data_dir, filename)
         cookie_file = os.path.join(user_path, "cookie")
@@ -45,20 +48,20 @@ class NetEase(object):
             try:
                 os.makedirs(data_dir)
             except:
-                return ""
+                return None
         if not os.path.exists(user_path):
             try:
                 os.makedirs(user_path)
             except:
-                return ""
+                return None
 
         if not os.path.exists(cookie_file):
             try:
-                f = open(cookie_file, "w", encoding="utf-8")
-                f.write('#LWP-Cookies-2.0\nSet-Cookie3:')
-                f.close()
+                with open(cookie_file, "w", encoding="utf-8") as f:
+                    f.write('#LWP-Cookies-2.0\nSet-Cookie3:')
+                    f.close()
             except:
-                return ""
+                return None
 
         return cookie_file
 
@@ -119,21 +122,23 @@ class NetEase(object):
         finally:
             return data
 
-    def login(self, username, password):
-        cookie_file = self.cookiefile(str(username))
+    def login(self, username, password, countrycode='86'):
+        username = str(username)
+        cookie_file = self.get_cookie_file(username)
         if cookie_file:
-            if self.username != str(username):
+            if self.username != username:
                 cookie_jar = LWPCookieJar(cookie_file)
                 cookie_jar.load()
                 self.session.cookies = cookie_jar
-                self.session.cookies.load()
-                self.session.cookies.save()
-                self.username = str(username)
-
+                self.username = username
+        if len(password) < 32:
+            password = md5(password.encode(encoding='UTF-8')).hexdigest()
         if username.isdigit():
             path = "/weapi/login/cellphone"
-            params = dict(phone=username, password=password,
-                          rememberLogin="true")
+            if len(countrycode) == 0:
+                countrycode = '86'
+            params = dict(phone=username, countrycode=countrycode,
+                          password=password, rememberLogin="true")
         else:
             # magic token for login
             # see https://github.com/Binaryify/NeteaseCloudMusicApi/blob/master/router/login.js#L15
@@ -150,10 +155,10 @@ class NetEase(object):
         return data
 
     # 每日签到
-    def daily_task(self, is_mobile=True):
+    def daily_task(self, type=0):
         path = "/weapi/point/dailyTask"
-        params = dict(type=0 if is_mobile else 1)
-        return self.request("POST", path, params)
+        params = dict(type=type)
+        return self.request("POST", path, params, custom_cookies={'os': 'android'})
 
     # 用户歌单
     def user_playlist(self, uid, offset=0, limit=50, includeVideo=True):
@@ -162,7 +167,7 @@ class NetEase(object):
                       includeVideo=includeVideo)
         return self.request("POST", path, params)
 
-    # 创建歌单 privacy:0 为普通歌单，10 为隐私歌单；type:NORMAL|VIDEO
+    # 创建歌单 privacy:0 为普通歌单，10 为隐私歌单；type:NORMAL正常|VIDEO视频|SHARED共享
     def playlist_create(self, name, privacy=0, ptype='NORMAL'):
         path = "/weapi/playlist/create"
         params = dict(name=name, privacy=privacy, type=ptype)
@@ -223,7 +228,7 @@ class NetEase(object):
         path = "/weapi/v3/song/detail"
         params = dict(c=json.dumps([{"id": _id}
                       for _id in ids]), ids=json.dumps(ids))
-        return self.request("POST", path, params).get("songs", [])
+        return self.request("POST", path, params)
 
     # 关注用户
     def user_follow(self, id):
@@ -235,7 +240,6 @@ class NetEase(object):
         path = "/weapi/v1/play/record"
         params = dict(uid=uid, type=time_type, limit=limit,
                       offset=offset, total=total)
-        # .get("allData", [])   #weekData
         return self.request("POST", path, params)
 
     # 创建歌单 privacy:0 为普通歌单，10 为隐私歌单；type:NORMAL|VIDEO
@@ -267,7 +271,6 @@ class NetEase(object):
         return self.request("POST", path)
 
     # 云贝所有任务
-
     def yunbei_task(self):
         path = "/weapi/usertool/task/list/all"
         return self.request("POST", path)  # .get("data", [])
@@ -317,6 +320,11 @@ class NetEase(object):
             params = dict(actionType=actionType, platform=platform)
             return self.request("POST", path, params)
 
+    # 获取任务
+    def mission_stage_get(self):
+        path = '/weapi/nmusician/workbench/mission/stage/list'
+        return self.request("POST", path)           
+
     # 领取云豆
     def reward_obtain(self, userMissionId, period):
         path = '/weapi/nmusician/workbench/mission/reward/obtain/new'
@@ -339,16 +347,16 @@ class NetEase(object):
 
     # 对歌曲进行评论
     def comments_add(self, song_id, content):
-        path = "/weapi/resource/comments/add"
+        path = "/weapi/v1/resource/comments/add"
         params = dict(threadId='R_SO_4_'+str(song_id), content=content)
-        return self.request("POST", path, params)
+        return self.request("POST", path, params, custom_cookies={'os': 'android'})
 
     # 回复歌曲评论
     def comments_reply(self, song_id, commentId, content):
         path = "/weapi/v1/resource/comments/reply"
         params = dict(commentId=commentId, threadId='R_SO_4_' +
                       str(song_id), content=content)
-        return self.request("POST", path, params)
+        return self.request("POST", path, params, custom_cookies={'os': 'android'})
 
     # 删除评论
     def comments_delete(self, song_id, commentId):
@@ -389,3 +397,126 @@ class NetEase(object):
         path = "/weapi/vipnewcenter/app/level/task/reward/get"
         params = dict(taskIds=','.join(taskIds))
         return self.request("POST", path, params)
+
+    # 新vip任务列表
+    def vip_task_newlist(self):
+        path = "/weapi/vipnewcenter/app/level/task/newlist"
+        return self.request("POST", path)
+
+    # 领取所有会员成长值
+    def vip_reward_getall(self):
+        path = "/weapi/vipnewcenter/app/level/task/reward/getall"
+        return self.request("POST", path)
+
+    # 云贝过期提醒
+    def expire_attention(self):
+        path = "/weapi/usertool/yunbei/center/attention"
+        return self.request("POST", path)
+
+    # 签到进度
+    def signin_progress(self, moduleId):
+        path = "/weapi/act/modules/signin/v2/progress"
+        params = dict(moduleId=moduleId)
+        return self.request("POST", path, params)
+
+    def mlog_nos_token(self, filepath):
+        path = "/weapi/nos/token/whalealloc"
+        bizKey = ''
+        for i in range(8):
+            bizKey += hex(random.randint(0, 15)).replace('0x', '')
+        _, filename = os.path.split(filepath)
+        with open(filepath, 'rb') as f:
+            contents = f.read()
+            file_md5 = md5(contents).hexdigest()
+        params = dict(
+            bizKey=bizKey,
+            filename=filename,
+            bucket='yyimgs',
+            md5=file_md5,
+            type='image',
+            fileSize=os.path.getsize(filepath),
+        )
+        return self.request("POST", path, params)
+
+    def upload_file(self, filepath, token):
+        data = token['data']
+        path = "http://45.127.129.8/{}/{}?offset=0&complete=true&version=1.0".format(
+            data['bucket'], data['objectKey'])
+        content_type = ''
+        if filepath.endswith('jpg'):
+            content_type = 'image/jpeg'
+        elif filepath.endswith('png'):
+            content_type = 'image/png'
+        elif filepath.endswith('gif'):
+            content_type = 'image/gif'
+        elif filepath.endswith('mpg'):
+            content_type = 'audio/mp3'
+        elif filepath.endswith('flac'):
+            content_type = 'audio/mpeg'
+        headers = {
+            'x-nos-token': data['token'],
+            'Content-Type': content_type,
+        }
+        with open(filepath, 'rb') as f:
+            res = requests.post(url=path, data=f, headers=headers)
+        return res
+
+    def mlog_pub(self, token, height, width, songId, songName='', text='share'):
+        path = "/weapi/mlog/publish/v1"
+
+        params = {
+            'type': 1,
+            'mlog': json.dumps({
+                'content': {
+                    'image': [{
+                        'height': height,
+                        'width': width,
+                        'more': False,
+                        'nosKey': token['data']['bucket'] + '/' + token['data']['objectKey'],
+                        'picKey': token['data']['resourceId']
+
+                    }],
+                    'needAudio': False,
+                    'song': {
+                        'endTime': 0,
+                        'name': songName,
+                        'songId': songId,
+                        'startTime': 30000
+                    },
+                    'text': text,
+                },
+                'from': 0,
+                'type': 1,
+            })
+        }
+        return self.request("POST", path, params)
+
+    # 获取歌曲评论
+    def song_comments(self, music_id, offset=0, total="false", limit=100):
+        path = "/weapi/v1/resource/comments/R_SO_4_{}/".format(music_id)
+        params = dict(rid=music_id, offset=offset, total=total, limit=limit)
+        return self.request("POST", path, params)
+
+    # 音乐人专辑列表
+    def musician_album(self):
+        path = "/weapi/nmusician/production/common/artist/album/item/list/get"
+        return self.request("POST", path)
+
+    def watch_college_lesson(self):
+        path = "/weapi/nmusician/workbench/creator/watch/college/lesson"
+        return self.request("POST", path)
+
+    def artist_homepage(self, artistId):
+        path = "/weapi/personal/home/page/artist"
+        params = dict(artistId=artistId)
+        return self.request("POST", path, params)
+
+    def circle_get(self, circleId):
+        path = "/weapi/circle/get"
+        params = dict(circleId=circleId)
+        return self.request("POST", path, params)        
+
+    def vipcenter_task_external(self, type):
+        path = "/weapi/vipnewcenter/app/level/task/external"
+        params = dict(type=type)
+        return self.request("POST", path, params)             

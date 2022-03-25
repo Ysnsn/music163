@@ -1,121 +1,167 @@
-# coding: utf-8
+# -*- coding: utf-8 -*-
+"""
+cron: 35 8 * * *
+new Env('网易云音乐自动任务');
+"""
+from utils import updateConfig
+import time
 import requests
 import json
+import json5
 import re
+import os
 from user import User
-from wecom import WeComtAlert
+from pusher import Pusher
+from utils import append_environ
+import random
 
 
-def start():
-    with open('./config.json', 'r', encoding='utf-8') as f:
-        config = json.loads(re.sub(r'\/\*[\s\S]*?\/', '', f.read()))
+runtime = 'tencent-scf'
+
+
+def md2text(data):
+    data = re.sub(r'\n\n', r'\n', data)
+    data = re.sub(r'\[(.*?)\]\((.*?)\)', r'\1: \2 ', data)
+    data = re.sub(r'\t', r'  ➢ ', data)
+    data = re.sub(r'\*\*(.*?)\*\*\n', r'【\1】\n', data)
+    data = re.sub(r'### ', r'\n', data)
+    data = re.sub(r'`', r'', data)
+    return data
+
+
+def md2fullMd(data):
+    data = re.sub(r'\*\*(.*?)\*\*\n', r'#### \1\n', data)
+    data = re.sub(r'\t', r'- ', data)
+    return data
+
+
+def getSongNumber():
+    res = {}
+    if runtime == 'tencent-scf':
+        if "SONG_NUMBER" in os.environ:
+            sp1 = os.environ.get("SONG_NUMBER").split("#")
+            if len(sp1) != 2:
+                return res
+            if sp1[0] != time.strftime("%Y-%m-%d", time.gmtime(time.time()+28800)):
+                print("环境变量 SONG_NUMBER 已过期。是否未开启定时触发器 timer-songnumber")
+                return res
+            for number in sp1[1].split(";"):
+                sp2 = number.split(":")
+                if len(sp2) == 2:
+                    res[sp2[0]] = int(sp2[1])
+        else:
+            print(
+                "环境变量 SONG_NUMBER 不存在。项目地址: https://github.com/chen310/NeteaseCloudMusicTasks")
+    return res
+
+
+def start(event={}, context={}):
+    with open('config.json', 'r', encoding='utf-8') as f:
+        config = json5.load(f)
+
+    print('Version:', config['version'])
+    if 'sha' in config:
+        print('Commit ID:', config['sha'])
+
+    # 公共配置
     setting = config['setting']
 
-    user_count = 0
-
-    SCKEYs = {}
-    Skeys = {}
-    pushToken = {}
-
+    songnumber = getSongNumber()
+    # 推送
+    pusher = Pusher()
+    saved_environs = {}
     for user_config in config['users']:
-        user_count += 1
-
-        user_setting = setting
+        if not user_config['enable']:
+            continue
+        # 获取账号配置
         if "setting" in user_config:
-            for key in user_config['setting']:
-                user_setting[key] = user_config['setting'][key]
+            user_setting = updateConfig(user_config["setting"], setting)
+        else:
+            user_setting = setting
 
         user = User()
-        user.setUser(username=user_config['username'], password=user_config['password'],
-                     isMd5=user_config['md5'], user_setting=user_setting, No=user_count, ip=user_config['X-Real-IP'])
+        user.runtime = runtime
+        user.setUser(user_config, user_setting)
         if user.isLogined:
-            user.userInfo()
+            user.songnumber = songnumber.get(str(user.uid), -1)
+            user.startTask()
 
-            if user_setting['follow']:
-                user.follow()
+        for push in user_setting['push'].values():
+            if not push['enable']:
+                continue
+            data = {
+                'title': user.title,
+                'mdmsg': md2fullMd(user.msg),
+                'mdmsg_compat': user.msg,
+                'textmsg': md2text(user.msg),
+                'config': push
+            }
+            pusher.append(data)
+        saved_environs.update(user.saved_environs)
+    if len(saved_environs) > 0:
+        res = append_environ(saved_environs)
+        if res:
+            print('已成功保存环境变量')
+        else:
+            print('环境变量保存失败')
+    pusher.push()
 
-            if user_setting['sign']:
-                user.sign()
-            if user.userType == 4:
-                user.musician_task()
 
-            task_on = False
-            tasks = user_setting['yunbei_task']
-            for task in user_setting['yunbei_task']:
-                task_on = task_on or tasks[task]['enable']
-            if task_on:
-                user.yunbei_task()
+def setSongNumber():
+    with open('config.json', 'r', encoding='utf-8') as f:
+        config = json5.load(f)
+    setting = config['setting']
+    songNumber = ""
+    timer_enable = False
+    time.sleep(random.randint(5, 20))
+    for user_config in config['users']:
+        if not user_config['enable']:
+            continue
+        if "setting" in user_config:
+            user_setting = updateConfig(user_config["setting"], setting)
+        else:
+            user_setting = setting
 
-            user.get_yunbei()
+        if (not user_setting['daka']['enable']) or (not user_setting['daka']['auto']):
+            continue
 
-            if user.vipType == 11:
-                user.vip_task()
-
-            if user_setting['daka']['enable']:
-                user.daka()
-
-            if user_setting['other']['play_playlists']['enable']:
-                user.play_playlists()
-
-        user.msg = user.msg.strip()
-        sckey = user_setting['serverChan']['SCKEY']
-        if user_setting['serverChan']['enable'] and sckey != '':
-            if sckey in SCKEYs:
-                SCKEYs[sckey]['msg'] += user.msg
+        user = User()
+        user.runtime = runtime
+        user.setUser(user_config, user_setting)
+        if user.isLogined:
+            if user.listenSongs == 0:
+                resp = user.music.user_detail(user.uid)
+                listenSongs = resp['listenSongs']
             else:
-                SCKEYs[sckey] = {'title': user.title, 'msg': user.msg}
+                listenSongs = user.listenSongs
+            # if user_setting['daka']['full_stop'] == True and (resp['level'] == 10 or resp['listenSongs'] >= 20000):
+            #     continue
+            songNumber += str(user.uid) + ":" + str(listenSongs) + ";"
+            timer_enable = True
+        time.sleep(2)
+    if not timer_enable:
+        # TODO
+        pass
+    if not songNumber:
+        print('未更新歌曲播放数量')
+        return
+    songNumber = time.strftime(
+        "%Y-%m-%d", time.gmtime(time.time()+28800)) + "#" + songNumber
 
-        skey = user_setting['CoolPush']['Skey']
-        if user_setting['CoolPush']['enable'] and skey != '':
-            if skey in Skeys:
-                Skeys[skey]['msg'] += user.msg
-            else:
-                Skeys[skey] = {
-                    'title': user.title, 'method': user_setting['CoolPush']['method'], 'msg': user.msg}
-
-        pushtoken = user_setting['pushPlus']['pushToken']
-        if user_setting['pushPlus']['enable'] and pushtoken != '':
-            if pushtoken in pushToken:
-                pushToken[pushtoken]['msg'] += user.msg
-            else:
-                pushToken[pushtoken] = {'title': user.title, 'msg': user.msg}
-
-        if user_setting['WeCom']['enable'] and user_setting['WeCom']['corpid'] != "" and user_setting['WeCom']['secret'] != "" and user_setting['WeCom']['agentid'] != "":
-            alert = WeComtAlert(
-                user_setting['WeCom']['corpid'], user_setting['WeCom']['secret'], user_setting['WeCom']['agentid'])
-            alert.send_msg(user_setting['WeCom']['userid'], user_setting['WeCom']['msgtype'],
-                           user.msg, "网易云音乐打卡", 'https://music.163.com/#/user/home?id='+str(user.uid))
-
-    for sckey in SCKEYs:
-        serverChan_url = 'http://sc.ftqq.com/'+sckey+'.send'
-        requests.post(serverChan_url, data={
-                      "text": SCKEYs[sckey]['title'], "desp": SCKEYs[sckey]['msg']})
-
-    for skey in Skeys:
-        for method in Skeys[skey]['method']:
-            CoolPush_url = "https://push.xuthus.cc/{}/{}".format(method, skey)
-            if method == "email":
-                requests.post(CoolPush_url, data={
-                              "t": Skeys[skey]['title'], "c": Skeys[skey]['msg']})
-            else:
-                requests.get(CoolPush_url, params={"c": Skeys[skey]['msg']})
-
-    # Pushplus推送
-    for pushtoken in pushToken:
-        push_url = 'http://www.pushplus.plus/send'
-        data = {
-            "token": pushtoken,
-            "title": pushToken[pushtoken]['title'],
-            "content": pushToken[pushtoken]['msg']
-        }
-        body = json.dumps(data).encode(encoding='utf-8')
-        headers = {'Content-Type': 'application/json'}
-        requests.post(push_url, data=body, headers=headers)
+    res = append_environ({"SONG_NUMBER": songNumber})
+    if res:
+        print("已更新歌曲播放数量")
+    else:
+        print("歌曲播放数量更新失败")
 
 
 def main_handler(event, context):
-    return start()
+    if event.get("Type") == "Timer" and event.get("TriggerName") == "timer-songnumber":
+        setSongNumber()
+        return
+    start(event, context)
 
 
 if __name__ == '__main__':
+    runtime = 'local'
     start()
